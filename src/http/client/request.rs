@@ -71,6 +71,7 @@ pub struct RequestWriter<S = super::NetworkStream> {
     // io::net::tcp::TcpStream or an SSL wrapper around that)
     stream: Option<BufferedStream<S>>,
     headers_written: bool,
+    body: ~[u8],
 
     /// The originating IP address of the request.
     pub remote_addr: Option<SocketAddr>,
@@ -104,6 +105,10 @@ impl<S: Reader + Writer = super::NetworkStream> RequestWriter<S> {
     pub fn new(method: Method, url: Url) -> IoResult<RequestWriter<S>> {
         RequestWriter::new_request(method, url, false, true)
     }
+
+    //pub fn set_read_timeout(&mut self, ms: u64) {
+    //    self.stream.expect("").set_read_timeout(Some(ms));
+    //}
 
     pub fn new_request(method: Method, url: Url, use_ssl: bool, auto_detect_ssl: bool) -> IoResult<RequestWriter<S>> {
         let host = match url.port {
@@ -154,6 +159,7 @@ impl<S: Reader + Writer = super::NetworkStream> RequestWriter<S> {
             method: method,
             url: url,
             use_ssl: use_ssl,
+            body: ~[]
         };
 
         if auto_detect_ssl {
@@ -176,6 +182,16 @@ impl<S: Connecter + Reader + Writer = super::NetworkStream> RequestWriter<S> {
             Ok(())
         }
     }
+
+    fn write_body(&mut self) -> IoResult<()> {
+        if !self.headers_written {
+            try!(self.write_headers());
+        }
+        // TODO: decide whether using get_mut_ref() is sound
+        // (it will cause failure if None)
+        self.stream.get_mut_ref().write(self.body)
+    }
+    
 
     /// Connect to the remote host; fails if already connected.
     /// Returns ``true`` upon success and ``false`` upon failure (also use conditions).
@@ -203,6 +219,15 @@ impl<S: Connecter + Reader + Writer = super::NetworkStream> RequestWriter<S> {
         }
     }
 
+    pub fn set_body(&mut self, data: &[u8]) {
+        if self.headers_written {
+            fail!("RequestWriter.set_body() called, but headers already written");
+        }
+
+        self.headers.content_length = Some(data.len());
+        self.body = data.to_owned();
+    }
+    
     /// Write the Status-Line and headers of the response, in preparation for writing the body.
     ///
     /// If the headers have already been written, this will fail. See also `try_write_headers`.
@@ -236,7 +261,7 @@ impl<S: Connecter + Reader + Writer = super::NetworkStream> RequestWriter<S> {
      * request will be returned as an `Err`.
      */
     pub fn read_response(mut self) -> Result<ResponseReader<S>, (RequestWriter<S>, IoError)> {
-        match self.try_write_headers() {
+        match self.write_body() {
             Ok(()) => (),
             Err(err) => return Err((self, err)),
         };
@@ -253,15 +278,11 @@ impl<S: Connecter + Reader + Writer = super::NetworkStream> RequestWriter<S> {
 
 /// Write the request body. Note that any calls to `write()` will cause the headers to be sent.
 impl<S: Reader + Writer + Connecter = super::NetworkStream> Writer for RequestWriter<S> {
-    fn write(&mut self, buf: &[u8]) -> IoResult<()> {
-        if !self.headers_written {
-            try!(self.write_headers());
-        }
-        // TODO: decide whether using get_mut_ref() is sound
-        // (it will cause failure if None)
-        self.stream.get_mut_ref().write(buf)
+    fn write(&mut self, data: &[u8]) -> IoResult<()> {
+        self.set_body(data);
+        return self.write_body();
     }
-
+    
     fn flush(&mut self) -> IoResult<()> {
         // TODO: ditto
         self.stream.get_mut_ref().flush()
